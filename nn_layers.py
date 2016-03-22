@@ -3,7 +3,9 @@ import numpy
 import theano
 from theano import tensor as T
 from theano.tensor.nnet import conv
-from theano.tensor.shared_randomstreams import RandomStreams
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+#from theano.tensor.shared_randomstreams import RandomStreams
+from theano.sandbox.cuda.rng_curand import CURAND_RandomStreams
 from theano.sandbox.cuda.fftconv import conv2d_fft
 from theano.tensor.signal import downsample
 
@@ -181,7 +183,6 @@ class PadLayer(Layer):
     return out
 
 
-
 class LookupTableFastStatic(Layer):
     """ Basic linear transformation layer (W.X + b).
     Padding is used to force conv2d with valid mode behave as working in full mode."""
@@ -301,7 +302,6 @@ class LinearLayer(Layer):
     return "{}: W_shape={} b_shape={} activation={}".format(self.__class__.__name__, self.W.shape.eval(), self.b.shape.eval(), self.activation)
 
 
-
 class NonLinearityLayer(Layer):
   def __init__(self, b_size, b=None, activation=T.tanh):
     super(NonLinearityLayer, self).__init__()
@@ -376,6 +376,7 @@ class KMaxPoolLayer(Layer):
   def __repr__(self):
     return "{}: k_max={}".format(self.__class__.__name__, self.k_max)
 
+
 class KMaxPoolLayerNative(Layer):
   """Folds across last axis (ndim)."""
   def __init__(self, shape,st=None,ignore_border=True):
@@ -390,12 +391,14 @@ class KMaxPoolLayerNative(Layer):
   def __repr__(self):
     return "{}: k_max={}".format(self.__class__.__name__, self.maxpool_shape)
 
+
 class MaxPoolLayer1(Layer):
     def __init__(self):
         super(MaxPoolLayer1, self).__init__()
 
     def output_func(self, input):
         return T.max(input,axis=2)
+
 
 class MaxPoolLayer(Layer):
   """Folds across last axis (ndim)."""
@@ -468,6 +471,63 @@ class MeanLayer(Layer):
 
     def output_func(self, input):
         return input.mean(axis=2)
+
+
+class Training(Layer):
+    def __init__(self,rng, W=None,m=1.0, n_samples=50,shape=None,batch_size=1000):
+        if W is None:
+            W = numpy.asarray(rng.uniform(
+                low=-numpy.sqrt(6. / (shape[0] + shape[1])),
+                high=numpy.sqrt(6. / (shape[0] + shape[1])),
+                size=(shape[0], shape[1])), dtype=theano.config.floatX)
+
+        self.W = theano.shared(value=W, name='Hashtag_emb', borrow=True)
+        self.batch_size = batch_size
+        self.n_ht = W.shape[0]
+        self.m = m
+        self.n_samples = n_samples
+        self.csrng = CURAND_RandomStreams(123)
+        mask = self.csrng.uniform(size=(self.n_samples,1),low=0.0,high=1.0,dtype=theano.config.floatX)
+        self.rfun = theano.function([],mask.argsort(axis=0))
+
+        self.alpha = T.constant(1.0/numpy.arange(start=1,stop=self.n_ht + 1,step=1))
+
+        self.weights = [self.W]
+        self.biases = []
+
+    def __repr__(self):
+        return "{}: W_shape: {}, m={}, n_samples={}, n_ht={}".format(self.__class__.__name__, self.W.shape.eval(),self.m,self.n_samples,self.n_ht)
+
+    def output_func(self, input):
+        self.f = T.tensordot(input.dimshuffle(0,'x',1),self.W.dimshuffle('x',0,1),axes=[[1,2],[0,2]]) # cosine sim
+        self.y_pred = T.argmax(self.f,axis=0)
+        return self.y_pred
+
+    def get_tag_neg(self,f,f_y):
+            cand = f[(f > f_y - self.m).nonzero()]
+            rnk =cand.shape[0] - 1# due to i != y
+            if rnk == 0:
+                return 0
+            l = T.sum(self.alpha[T.arange(rnk)])
+            return l/rnk
+
+    def _warp_loss_cost(self, y,i):
+        f_y = self.f[T.arange(y.shape[0]), y]
+        s = self.m - f_y + self.f[T.arange(i.shape[0]),i]
+        return T.maximum(0.0,s)
+
+    def warp_loss_cost(self, y, idx):
+        f_y = self.f[T.arange(y.shape[0]), y]
+        f_yy = T.repeat(f_y.dimshuffle(0,'x'),self.f.shape[1],axis=1)
+
+        f_idx = T.maximum(0.0,f_yy - self.f + self.m)
+        idx = f_idx.argsort(axis=1)[:,0]
+
+        s = self.m - f_y + self.f[T.arange(idx.shape[0]),idx]
+        return T.maximum(0.0,s)
+
+    def training_cost(self, y,i):
+        return T.mean(self.warp_loss_cost(y,i))
 
 
 # def Conv2dMaxPool(rng, filter_shape, activation):

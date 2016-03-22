@@ -7,8 +7,9 @@ import nn_layers
 import sgd_trainer
 from tqdm import tqdm
 import time
-from sklearn import metrics
 import theano.sandbox.cuda.basic_ops
+from evalutaion_metrics import precision_at_k
+from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 
 def get_next_chunk(fname_tweet,fname_sentiment,n_chunks=1):
@@ -35,11 +36,7 @@ def get_next_chunk(fname_tweet,fname_sentiment,n_chunks=1):
 
 
 def main():
-    HOME_DIR = "semeval_parsed"
-    timestamp = str(long(time.time()*1000))
-    input_fname = '200M'
-
-    data_dir = HOME_DIR + '_' + input_fname
+    data_dir = "parsed_tweets"
     numpy_rng = numpy.random.RandomState(123)
     q_max_sent_size = 140
 
@@ -47,17 +44,31 @@ def main():
     embedding_fname = 'emb_smiley_tweets_embedding_final.npy'
     fname_wordembeddings = os.path.join(data_dir, embedding_fname)
 
-
     print "Loading word embeddings from", fname_wordembeddings
     vocab_emb = numpy.load(fname_wordembeddings)
     print type(vocab_emb[0][0])
     print "Word embedding matrix size:", vocab_emb.shape
 
+
+    #Load hasthag embeddings
+    embedding_fname = 'emb_smiley_tweets_embedding_topn.npy'
+    fname_htembeddings = os.path.join(data_dir, embedding_fname)
+    print "Loading word embeddings from", fname_htembeddings
+    vocab_emb_ht = numpy.load(fname_htembeddings)
+    print type(vocab_emb_ht[0][0])
+    print "Word embedding matrix size:", vocab_emb_ht.shape
+
+
+
+    print 'Load Test Set'
+    dev_set = numpy.load('parsed_tweets/hashtag_top100_smiley_tweets_test.tweets.npy')
+    y_dev_set = numpy.load('parsed_tweets/hashtag_top100_smiley_tweets_test.hashtags.npy')
+
     tweets = T.imatrix('tweets_train')
     y = T.lvector('y_train')
 
     #######
-    n_outs = 2
+    n_outs = 100
     batch_size = 1000
     max_norm = 0
 
@@ -72,18 +83,11 @@ def main():
         return x * (x > 0)
 
     activation = relu
-    nkernels1 = 200
-    nkernels2 = 200
+    nkernels1 = 1000
     k_max = 1
-    shape1 = 6
-    st = (3,1)
     num_input_channels = 1
-    filter_width1 = 6
-    filter_width2 = 3
-    q_logistic_n_in = nkernels1 * k_max
-    sent_size = q_max_sent_size + 2*(filter_width1 - 1)
-    layer1_size = (sent_size - filter_width1 + 1 - shape1)//st[0] + 1
-    print layer1_size
+    filter_width1 = 4
+    n_in = nkernels1 * k_max
 
     input_shape = (
         batch_size,
@@ -97,25 +101,22 @@ def main():
     #########
     parameter_map = {}
     parameter_map['nKernels1'] = nkernels1
-    parameter_map['nKernels2'] = nkernels2
     parameter_map['num_input_channels'] = num_input_channels
     parameter_map['ndim'] = ndim
     parameter_map['inputShape'] = input_shape
     parameter_map['activation'] = 'relu'
-    parameter_map['qLogisticIn'] = q_logistic_n_in
+    parameter_map['n_in'] = n_in
     parameter_map['kmax'] = k_max
-    parameter_map['st'] = st
 
     parameter_map['filterWidth'] = filter_width1
 
-    lookup_table_words = nn_layers.LookupTableFast(
+    lookup_table_words = nn_layers.LookupTableFastStatic(
         W=vocab_emb,
         pad=filter_width1-1
     )
 
     parameter_map['LookupTableFastStaticW'] = lookup_table_words.W
 
-    conv_layers = []
     filter_shape = (
         nkernels1,
         num_input_channels,
@@ -140,61 +141,14 @@ def main():
 
     parameter_map['NonLinearityLayerB' + str(filter_width1)] = non_linearity.b
 
-    pooling = nn_layers.KMaxPoolLayerNative(shape=shape1,ignore_border=True,st=st)
-
-    parameter_map['PoolingShape1'] = shape1
-    parameter_map['PoolingSt1'] = st
-
-    input_shape2 = (
-        batch_size,
-        nkernels1,
-        (input_shape[2] - filter_width1 + 1 - shape1)//st[0] + 1,
-        1
-    )
-
-    parameter_map['input_shape2'+ str(filter_width1)] = input_shape2
-
-    filter_shape2 = (
-        nkernels2,
-        nkernels1,
-        filter_width2,
-        1
-    )
-
-    parameter_map['FilterShape2' + str(filter_width1)] = filter_shape2
-
-    con2 = nn_layers.Conv2dLayer(
-        rng=numpy_rng,
-        input_shape=input_shape2,
-        filter_shape=filter_shape2
-    )
-
-    parameter_map['Conv2dLayerW2' + str(filter_width1)] = con2.W
-
-    non_linearity2 = nn_layers.NonLinearityLayer(
-        b_size=filter_shape2[0],
-        activation=activation
-    )
-
-    parameter_map['NonLinearityLayerB2' + str(filter_width1)] = non_linearity2.b
-
-    shape2 = input_shape2[2] - filter_width2 + 1
-    pooling2 = nn_layers.KMaxPoolLayerNative(shape=shape2,ignore_border=True)
-    n_in = nkernels2*(layer1_size - filter_width2 + 1)//shape2
-    parameter_map['n_in'] = n_in
-    parameter_map['PoolingShape2'] = shape2
+    pooling = nn_layers.KMaxPoolLayer(k_max=k_max)
 
     conv2dNonLinearMaxPool = nn_layers.FeedForwardNet(layers=[
         conv,
         non_linearity,
-        pooling,
-        con2,
-        non_linearity2,
-        pooling2
+        pooling
     ])
-    conv_layers.append(conv2dNonLinearMaxPool)
 
-    join_layer = nn_layers.ParallelLayer(layers=conv_layers)
     flatten_layer = nn_layers.FlattenLayer()
 
     hidden_layer = nn_layers.LinearLayer(
@@ -207,11 +161,12 @@ def main():
     parameter_map['LinearLayerW'] = hidden_layer.W
     parameter_map['LinearLayerB'] = hidden_layer.b
 
-    classifier = nn_layers.LogisticRegression(n_in=n_in, n_out=n_outs)
+    classifier = nn_layers.Training(numpy_rng,W=None,shape=(102,nkernels1))
+    #classifier = nn_layers.LogisticRegression(n_in=n_in,n_out=n_outs)
 
     nnet_tweets = nn_layers.FeedForwardNet(layers=[
         lookup_table_words,
-        join_layer,
+        conv2dNonLinearMaxPool,
         flatten_layer,
         hidden_layer,
         classifier
@@ -229,9 +184,17 @@ def main():
 
     params = nnet_tweets.params
     print params
-    cost = nnet_tweets.layers[-1].training_cost(y)
+
+    mrg_rng = MRG_RandomStreams()
+    i = mrg_rng.uniform(size=(batch_size,vocab_emb_ht.shape[0]),low=0.0,high=1.0,dtype=theano.config.floatX).argsort(axis=1)
+
+    cost = nnet_tweets.layers[-1].training_cost(y,i)
     predictions = nnet_tweets.layers[-1].y_pred
-    predictions_prob = nnet_tweets.layers[-1].p_y_given_x[:, -1]
+    predictions_prob = nnet_tweets.layers[-1].f
+
+    #cost = nnet_tweets.layers[-1].training_cost(y)
+    #predictions = nnet_tweets.layers[-1].y_pred
+    #predictions_prob = nnet_tweets.layers[-1].p_y_given_x[:, -1]
 
     inputs_train = [batch_tweets, batch_y]
     givens_train = {tweets: batch_tweets,
@@ -267,18 +230,18 @@ def main():
     )
 
     def predict_prob_batch(batch_iterator):
-        preds = numpy.hstack([pred_prob_fn(batch_x_q[0]) for batch_x_q in batch_iterator])
+        preds = numpy.vstack([pred_prob_fn(batch_x_q[0]) for batch_x_q in batch_iterator])
         return preds[:batch_iterator.n_samples]
 
     def predict_batch(batch_iterator):
-        preds = numpy.hstack([pred_fn(batch_x_q[0]) for batch_x_q in batch_iterator])
+        preds = numpy.vstack([pred_fn(batch_x_q[0]) for batch_x_q in batch_iterator])
         return preds[:batch_iterator.n_samples]
 
     W_emb_list = [w for w in params if w.name == 'W_emb']
     zerout_dummy_word = theano.function([], updates=[(W, T.set_subtensor(W[-1:], 0.)) for W in W_emb_list])
 
     epoch = 0
-    n_epochs = 1
+    n_epochs = 25
     early_stop = 3
     best_dev_acc = -numpy.inf
     no_best_dev_update = 0
@@ -289,26 +252,13 @@ def main():
         max_chunks = numpy.inf
         curr_chunks = 0
         timer = time.time()
-        fname_tweet = open(os.path.join(data_dir, 'smiley_tweets.tweets.npy'),'rb')
-        fname_sentiments = open(os.path.join(data_dir, 'smiley_tweets.sentiments.npy'),'rb')
+        fname_tweet = open(os.path.join(data_dir, 'hashtag_top100_smiley_tweets_train.tweets.npy'),'rb')
+        fname_sentiments = open(os.path.join(data_dir, 'hashtag_top100_smiley_tweets_train.hashtags.npy'),'rb')
         while curr_chunks < max_chunks:
-            smiley_set_tweets,smiley_set_sentiments,chunks = get_next_chunk(fname_tweet, fname_sentiments, n_chunks=4)
-            print smiley_set_sentiments
+            train_set,y_train_set,chunks = get_next_chunk(fname_tweet, fname_sentiments, n_chunks=2)
             curr_chunks += chunks
-            if smiley_set_tweets == None:
+            if train_set is None:
                 break
-
-            print 'Chunk number:',curr_chunks
-            smiley_set_sentiments = smiley_set_sentiments.astype(int)
-
-            smiley_set = zip(smiley_set_tweets,smiley_set_sentiments)
-            numpy_rng.shuffle(smiley_set)
-            smiley_set_tweets[:],smiley_set_sentiments[:] = zip(*smiley_set)
-
-            train_set = smiley_set_tweets[0 : int(len(smiley_set_tweets) * 0.98)]
-            dev_set = smiley_set_tweets[int(len(smiley_set_tweets) * 0.98):int(len(smiley_set_tweets) * 1)]
-            y_train_set = smiley_set_sentiments[0 : int(len(smiley_set_sentiments) * 0.98)]
-            y_dev_set = smiley_set_sentiments[int(len(smiley_set_sentiments) * 0.98):int(len(smiley_set_sentiments) * 1)]
 
             print "Length trains_set:", len(train_set)
             print "Length dev_set:", len(dev_set)
@@ -325,8 +275,9 @@ def main():
             # Make sure the null word in the word embeddings always remains zero
             zerout_dummy_word()
 
-            y_pred_dev = predict_batch(dev_set_iterator)
-            dev_acc = metrics.accuracy_score(y_dev_set, y_pred_dev) * 100
+            y_pred_dev = predict_prob_batch(dev_set_iterator)
+            dev_acc = precision_at_k(y_dev_set, y_pred_dev,k=1) * 100
+            #dev_acc = metrics.accuracy_score(y_dev_set,y_pred_dev)
 
             if dev_acc > best_dev_acc:
                     print('epoch: {} chunk: {} best_chunk_auc: {:.4f}; best_dev_acc: {:.4f}'.format(epoch, curr_chunks, dev_acc,best_dev_acc))

@@ -178,7 +178,7 @@ def get_adadelta_updates(cost, params, rho=0.95, eps=1e-6, max_norm=9, word_vec_
         exp_su = exp_sqr_ups[param]
         up_exp_sg = rho * exp_sg + (1 - rho) * T.sqr(gp)
         updates[exp_sg] = up_exp_sg
-        step =  -(T.sqrt(exp_su + eps) / T.sqrt(up_exp_sg + eps)) * gp
+        step = -(T.sqrt(exp_su + eps) / T.sqrt(up_exp_sg + eps)) * gp
         updates[exp_su] = rho * exp_su + (1 - rho) * T.sqr(step)
         stepped_param = param + step
         # if (param.get_value(borrow=True).ndim == 2) and (param.name != word_vec_name):
@@ -190,6 +190,16 @@ def get_adadelta_updates(cost, params, rho=0.95, eps=1e-6, max_norm=9, word_vec_
         else:
             updates[param] = stepped_param
     return updates
+
+
+def get_warp_loss_updates(cost,params):
+    print "Generating WARP updates"
+    updates = OrderedDict({})
+
+    y = T.dscalar('y')
+
+    for param in params:
+        up = theano.function([y],cost)
 
 
 def _get_adadelta_updates(cost, params, rho=0.95, eps=1e-6, max_norm=9, word_vec_name='W_emb'):

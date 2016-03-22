@@ -1,0 +1,1 @@
+In this folder the output of the parser and the extract embeddings will be put.
