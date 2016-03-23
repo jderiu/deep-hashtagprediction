@@ -38,7 +38,7 @@ def get_next_chunk(fname_tweet,fname_sentiment,n_chunks=1):
 def main():
     data_dir = "parsed_tweets"
     numpy_rng = numpy.random.RandomState(123)
-    q_max_sent_size = 140
+
 
     # Load word2vec embeddings
     embedding_fname = 'emb_smiley_tweets_embedding_final.npy'
@@ -49,7 +49,6 @@ def main():
     print type(vocab_emb[0][0])
     print "Word embedding matrix size:", vocab_emb.shape
 
-
     #Load hasthag embeddings
     embedding_fname = 'emb_smiley_tweets_embedding_topn.npy'
     fname_htembeddings = os.path.join(data_dir, embedding_fname)
@@ -57,8 +56,6 @@ def main():
     vocab_emb_ht = numpy.load(fname_htembeddings)
     print type(vocab_emb_ht[0][0])
     print "Word embedding matrix size:", vocab_emb_ht.shape
-
-
 
     print 'Load Test Set'
     dev_set = numpy.load('parsed_tweets/hashtag_top100_smiley_tweets_test.tweets.npy')
@@ -72,9 +69,6 @@ def main():
     batch_size = 1000
     max_norm = 0
 
-    print 'batch_size', batch_size
-    print 'max_norm', max_norm
-
     ## 1st conv layer.
     ndim = vocab_emb.shape[1]
 
@@ -82,8 +76,9 @@ def main():
     def relu(x):
         return x * (x > 0)
 
+    q_max_sent_size = 140
     activation = relu
-    nkernels1 = 1000
+    nkernels1 = 1000 #200 #300
     k_max = 1
     num_input_channels = 1
     filter_width1 = 4
@@ -283,6 +278,7 @@ def main():
                     print('epoch: {} chunk: {} best_chunk_auc: {:.4f}; best_dev_acc: {:.4f}'.format(epoch, curr_chunks, dev_acc,best_dev_acc))
                     best_dev_acc = dev_acc
                     no_best_dev_update = 0
+                    #best_params = [numpy.copy(p.get_value(borrow=True)) for p in params]
             else:
                 print('epoch: {} chunk: {} best_chunk_auc: {:.4f}; best_dev_acc: {:.4f}'.format(epoch, curr_chunks, dev_acc,best_dev_acc))
             cPickle.dump(parameter_map, open(data_dir+'/parameters_{}.p'.format('distant'), 'wb'))
@@ -300,7 +296,9 @@ def main():
 
     cPickle.dump(parameter_map, open(data_dir+'/parameters_{}.p'.format('distant'), 'wb'))
     print('Training took: {:.4f} seconds'.format(time.time() - timer_train))
-
+    #add this
+    #for i, param in enumerate(best_params):
+    #    params[i].set_value(param, borrow=True)
 
 if __name__ == '__main__':
     main()
